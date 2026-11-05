@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Anywear — Virtual kiyib ko'rish</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700&family=DM+Sans:wght@400;500&display=swap">
+<style>
+/* Layout: kamera sahnasi chapda, kiyimlar paneli o'ngda; telefonda ustma-ust */
+:root{
+  --bg:#0f1113; --panel:#181b1f; --line:#2a2f36; --fg:#eef0f2; --muted:#8b939c; --accent:#3b6cff;
+  --display:"Bricolage Grotesque",system-ui,sans-serif; --body:"DM Sans",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px}
+body{padding:20px max(16px,env(safe-area-inset-left,0px))}
+header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;max-width:1180px;margin:0 auto 18px}
+h1{font:700 26px/1 var(--display);margin:0;letter-spacing:-.01em}
+header p{margin:0;color:var(--muted)}
+main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:20px;max-width:1180px;margin:0 auto}
+@media(max-width:860px){main{grid-template-columns:minmax(0,1fr)}}
+.stage{position:relative;background:#000;border-radius:14px;overflow:hidden;aspect-ratio:4/3;border:1px solid var(--line)}
+canvas#cv{width:100%;height:100%;display:block}
+video{display:none}
+.overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;background:rgba(15,17,19,.78)}
+.overlay[hidden]{display:none}
+.overlay h2{font:700 22px var(--display);margin:0}
+.overlay p{margin:0;color:var(--muted);max-width:38ch}
+button{font:500 15px var(--body);cursor:pointer;border:0;border-radius:10px;padding:12px 18px;background:var(--accent);color:#fff}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.hint{position:absolute;left:50%;top:14px;transform:translateX(-50%);background:rgba(15,17,19,.85);border:1px solid var(--line);padding:8px 14px;border-radius:999px;font-size:13px;max-width:92%;text-align:center}
+.hint[hidden]{display:none}
+.bar{position:absolute;right:12px;bottom:12px;display:flex;gap:8px}
+.bar button{padding:9px 13px;font-size:13px;background:rgba(15,17,19,.85);border:1px solid var(--line)}
+aside{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;align-self:start}
+aside h3{font:700 13px var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 12px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;max-height:560px;overflow-y:auto;padding-right:2px}
+.item{background:#e9ebee;border:2px solid transparent;border-radius:10px;padding:4px 4px 6px;cursor:pointer;text-align:center;color:#111;font-size:12px;line-height:1.2;display:flex;flex-direction:column;gap:4px}
+.item img{width:100%;display:block;border-radius:6px}
+.item.on{border-color:var(--accent)}
+.item.act{background:var(--bg);color:var(--fg);border:1px dashed var(--line);align-items:center;justify-content:center;min-height:100px;padding:8px}
+.item.act.on{border-style:solid}
+.note{color:var(--muted);font-size:13px;margin:14px 0 0;line-height:1.5}
+input[type=file]{display:none}
+</style>
+</head>
+<body>
+<header><h1>Anywear</h1><p>Kiyimni o'zingizda, shu sahifada kiyib ko'ring.</p></header>
+<main>
+  <section class="stage" id="stage">
+    <canvas id="cv" width="960" height="720"></canvas>
+    <video id="vid" playsinline muted></video>
+    <div class="hint" id="hint" hidden>Biroz orqaga turing — yelka va bel ko'rinsin</div>
+    <div class="bar"><button id="snap" class="ghost" hidden>Rasmga olish</button></div>
+    <div class="overlay" id="intro">
+      <h2>Virtual kiyib ko'rish</h2>
+      <p>Kamerani yoqing, o'ngdan kiyim tanlang. Video qurilmangizdan chiqmaydi.</p>
+      <button id="start">Kamerani yoqish</button>
+      <p id="err" style="color:#ff8a80"></p>
+    </div>
+  </section>
+  <aside>
+    <h3>Kiyimlar</h3>
+    <div class="grid" id="grid"></div>
+    <input type="file" id="file" accept="image/*">
+    <p class="note">Boshdan beldan pastgacha ko'ringan holda turing va qo'llaringizni erkin harakatlantiring. Yorug' joyda yaxshiroq ishlaydi.</p>
+  </aside>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
+<script>
+/* ============ yordamchilar ============ */
+const rng=seed=>()=>(seed=(seed*16807)%2147483647)/2147483647;
+const mk=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
+const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+const lerp=(a,b,t)=>a+(b-a)*t;
+const dist=(p,q)=>Math.hypot(p.x-q.x,p.y-q.y);
+const add=(p,q,k=1)=>({x:p.x+q.x*k,y:p.y+q.y*k});
+const sub=(p,q)=>({x:p.x-q.x,y:p.y-q.y});
+const mul=(p,k)=>({x:p.x*k,y:p.y*k});
+const norm=p=>{const l=Math.hypot(p.x,p.y)||1;return{x:p.x/l,y:p.y/l}};
+
+/* ============ matolar (tekstura) ============ */
+function grain(x,s,seed,amt=.07,n=2200){
+  const r=rng(seed);
+  for(let i=0;i<n;i++){x.fillStyle=r()>.5?`rgba(255,255,255,${amt})`:`rgba(0,0,0,${amt})`;x.fillRect(r()*s,r()*s,1+r()*1.5,1+r()*1.5)}
+}
+function knit(x,s,a=.08){
+  for(let i=0;i<s;i+=4){x.fillStyle=`rgba(0,0,0,${a})`;x.fillRect(i,0,1.4,s);x.fillStyle=`rgba(255,255,255,${a*.6})`;x.fillRect(i+2,0,1,s)}
+}
+function fabSolid(base,k=false){const c=mk(256,256),x=c.getContext('2d');x.fillStyle=base;x.fillRect(0,0,256,256);if(k)knit(x,256);grain(x,256,7,k?.05:.08);return c}
+function fabWave(){
+  const c=mk(256,256),x=c.getContext('2d');x.fillStyle='#1d4ed8';x.fillRect(0,0,256,256);
+  x.strokeStyle='#f4f7ff';x.lineWidth=11;x.lineCap='round';x.lineJoin='round';
+  for(let r=-1;r<=6;r++){
+    const y0=r*256/6+14;
+    for(const dy of[0,256]){ // bir tekis takrorlanishi uchun
+      x.beginPath();
+      for(let px=-8;px<=264;px+=4){
+        const ph=(r%2?Math.PI:0);
+        const y=y0+dy-256*0+Math.sin(px/128*Math.PI*2+ph)*15;
+        px===-8?x.moveTo(px,y):x.lineTo(px,y);
+      }
+      x.stroke();
+    }
+  }
+  knit(x,256,.1);grain(x,256,11,.06);return c;
+}
+function fabStripes(a,b){const c=mk(256,256),x=c.getContext('2d');for(let i=0;i<8;i++){x.fillStyle=i%2?b:a;x.fillRect(0,i*32,256,32)}knit(x,256,.06);grain(x,256,5,.06);return c}
+function fabPlaid(){
+  const c=mk(128,128),x=c.getContext('2d');x.fillStyle='#a31f1f';x.fillRect(0,0,128,128);
+  x.fillStyle='rgba(15,15,20,.62)';x.fillRect(0,0,26,128);x.fillRect(64,0,26,128);x.fillRect(0,0,128,26);x.fillRect(0,64,128,26);
+  x.fillStyle='rgba(255,255,255,.38)';x.fillRect(45,0,2,128);x.fillRect(109,0,2,128);x.fillRect(0,45,128,2);x.fillRect(0,109,128,2);
+  x.strokeStyle='rgba(0,0,0,.08)';for(let i=-128;i<256;i+=3){x.beginPath();x.moveTo(i,0);x.lineTo(i+128,128);x.stroke()}
+  grain(x,128,3,.06,700);
+  const o=mk(256,256),y=o.getContext('2d');y.fillStyle=y.createPattern(c,'repeat');y.fillRect(0,0,256,256);return o;
+}
+function fabDenim(){
+  const c=mk(256,256),x=c.getContext('2d');x.fillStyle='#4a6f9c';x.fillRect(0,0,256,256);
+  for(let i=-256;i<256;i+=3){x.strokeStyle=(i/3)%2?'rgba(255,255,255,.07)':'rgba(0,0,20,.08)';x.beginPath();x.moveTo(i,0);x.lineTo(i+256,256);x.stroke()}
+  grain(x,256,9,.13,3500);return c;
+}
+
+/* ============ kiyimlar ro'yxati ============ */
+const G=[
+ {name:'To‘lqinli sviter',fab:fabWave(),sleeve:'long',collar:'crew',rib:'#173fb5',hem:true,loose:1.05},
+ {name:'Oq turtleneck',fab:fabSolid('#ece8e0',true),sleeve:'long',collar:'turtle',rib:'#e2ddd3',hem:true,loose:1},
+ {name:'Kulrang xudi',fab:fabSolid('#4b505a',true),sleeve:'long',collar:'hood',rib:'#3d4149',hem:true,pocket:'kanga',loose:1.15},
+ {name:'Qora futbolka',fab:fabSolid('#16171a'),sleeve:'short',collar:'crew',rib:'#101113',loose:1},
+ {name:'Oq futbolka',fab:fabSolid('#f2f2ef'),sleeve:'short',collar:'crew',rib:'#e4e4df',loose:1},
+ {name:'Dengizchi',fab:fabStripes('#1b2742','#eeebe2'),sleeve:'long',collar:'crew',rib:'#1b2742',hem:true,loose:1},
+ {name:'Jinsi kurtka',fab:fabDenim(),sleeve:'long',collar:'shirt',rib:'#41648f',btn:'#d9b36a',denim:true,loose:1.08},
+ {name:'Kletchatka ko‘ylak',fab:fabPlaid(),sleeve:'long',collar:'shirt',rib:'#7d1515',btn:'#f1e9d8',loose:1.04},
+ {name:'Zaytun bomber',fab:fabSolid('#59603f'),sleeve:'long',collar:'stand',rib:'#3e432b',hem:true,loose:1.12},
+ {name:'Bordo polo',fab:fabSolid('#7a1f33',true),sleeve:'short',collar:'polo',rib:'#6a1a2c',btn:'#e8dcd0',loose:1},
+ {name:'Bej V-sviter',fab:fabSolid('#cbb89a',true),sleeve:'long',collar:'v',rib:'#b8a381',hem:true,loose:1.05},
+];
+
+/* ============ tana (torso) tekstura: 400x460, yelka chizig'i y=90, etak y=420 ============ */
+function buildTorso(g){
+  const c=mk(400,460),x=c.getContext('2d');
+  x.fillStyle=x.createPattern(g.fab,'repeat');
+  x.beginPath();x.roundRect(100,72,200,348,[16,16,0,0]);x.fill();
+  if(g.hem){x.fillStyle=g.rib;x.fillRect(100,398,200,22);
+    x.fillStyle='rgba(0,0,0,.14)';for(let i=102;i<300;i+=5)x.fillRect(i,398,1.5,22);}
+  const col=g.collar;
+  // bo'yin teshigi
+  x.globalCompositeOperation='destination-out';x.fillStyle='#000';
+  if(col==='crew'){x.beginPath();x.ellipse(200,76,36,22,0,0,7);x.fill()}
+  if(col==='v'){x.beginPath();x.moveTo(156,60);x.lineTo(200,152);x.lineTo(244,60);x.closePath();x.fill()}
+  if(col==='shirt'||col==='polo'){x.beginPath();x.ellipse(200,76,col==='polo'?30:28,16,0,0,7);x.fill()}
+  if(col==='hood'){x.beginPath();x.ellipse(200,84,42,24,0,0,7);x.fill()}
+  x.globalCompositeOperation='source-atop';
+  // soya: yon tomonlar, burmalar
+  let gr=x.createLinearGradient(100,0,300,0);
+  gr.addColorStop(0,'rgba(0,0,0,.30)');gr.addColorStop(.22,'rgba(0,0,0,0)');gr.addColorStop(.78,'rgba(0,0,0,0)');gr.addColorStop(1,'rgba(0,0,0,.30)');
+  x.fillStyle=gr;x.fillRect(100,72,200,348);
+  gr=x.createLinearGradient(0,300,0,420);gr.addColorStop(0,'rgba(0,0,0,0)');gr.addColorStop(1,'rgba(0,0,0,.18)');
+  x.fillStyle=gr;x.fillRect(100,300,200,120);
+  x.lineCap='round';
+  const folds=[[112,150,150,300],[288,160,248,310],[160,230,210,330],[250,240,230,340]];
+  for(const[f,a,b,d] of folds){
+    x.strokeStyle='rgba(0,0,0,.10)';x.lineWidth=11;x.beginPath();x.moveTo(f,a);x.quadraticCurveTo((f+b)/2+8,(a+d)/2,b,d);x.stroke();
+    x.strokeStyle='rgba(255,255,255,.06)';x.lineWidth=7;x.beginPath();x.moveTo(f+12,a);x.quadraticCurveTo((f+b)/2+20,(a+d)/2,b+10,d);x.stroke();
+  }
+  x.globalCompositeOperation='source-over';
+  // yoqa va detallar
+  const rib=g.rib;
+  const ribLines=(x0,y0,w,h,vert)=>{x.fillStyle='rgba(0,0,0,.16)';if(vert){for(let i=x0;i<x0+w;i+=5)x.fillRect(i,y0,1.5,h)}else{for(let i=y0;i<y0+h;i+=5)x.fillRect(x0,i,w,1.5)}};
+  if(col==='crew'||col==='v'){
+    x.strokeStyle=rib;x.lineWidth=g.sleeve==='short'?7:10;x.lineJoin='round';x.lineCap='round';
+    x.beginPath();
+    if(col==='crew')x.ellipse(200,76,36,22,0,0,7);else{x.moveTo(156,64);x.lineTo(200,150);x.lineTo(244,64)}
+    x.stroke();
+    x.strokeStyle='rgba(0,0,0,.28)';x.lineWidth=2.5;x.beginPath();
+    if(col==='crew')x.ellipse(200,79,34,20,0,0,3.2);else{x.moveTo(160,70);x.lineTo(200,146);x.lineTo(240,70)}
+    x.stroke();
+  }
+  if(col==='turtle'){
+    x.fillStyle=rib;x.beginPath();x.roundRect(160,30,80,66,14);x.fill();ribLines(160,30,80,66,false);
+    const t=x.createLinearGradient(160,0,240,0);t.addColorStop(0,'rgba(0,0,0,.2)');t.addColorStop(.5,'rgba(255,255,255,.08)');t.addColorStop(1,'rgba(0,0,0,.2)');
+    x.fillStyle=t;x.fillRect(160,30,80,66);
+  }
+  if(col==='stand'){
+    x.fillStyle=rib;x.beginPath();x.roundRect(154,46,92,50,12);x.fill();ribLines(154,46,92,50,true);
+    x.strokeStyle='#cfcfcf';x.lineWidth=3;x.beginPath();x.moveTo(200,96);x.lineTo(200,398);x.stroke();
+    x.strokeStyle='rgba(0,0,0,.35)';x.setLineDash([2,4]);x.lineWidth=3;x.beginPath();x.moveTo(203,96);x.lineTo(203,398);x.stroke();x.setLineDash([]);
+    x.strokeStyle='rgba(0,0,0,.4)';x.lineWidth=2;
+    for(const s of[1,-1]){x.beginPath();x.moveTo(200+s*70,250);x.lineTo(200+s*56,320);x.stroke()}
+  }
+  if(col==='hood'){
+    x.fillStyle=rib;x.beginPath();x.ellipse(200,80,74,42,0,Math.PI,0);x.lineTo(274,90);x.lineTo(126,90);x.closePath();x.fill();
+    x.globalCompositeOperation='destination-out';x.beginPath();x.ellipse(200,84,42,24,0,0,7);x.fill();x.globalCompositeOperation='source-over';
+    x.fillStyle='rgba(0,0,0,.25)';x.beginPath();x.ellipse(200,90,46,26,0,0,3.14);x.fill();
+    x.strokeStyle='#e5e7ea';x.lineWidth=4;x.lineCap='round';
+    for(const s of[-1,1]){x.beginPath();x.moveTo(200+s*22,108);x.lineTo(200+s*24,190);x.stroke()}
+  }
+  if(col==='shirt'||col==='polo'){
+    const sm=col==='polo';
+    x.fillStyle=g.denim?'#3f6290':(sm?rib:'#8c1818');x.strokeStyle='rgba(0,0,0,.4)';x.lineWidth=1.5;
+    for(const s of[-1,1]){x.beginPath();x.moveTo(200+s*(sm?30:36),sm?60:56);x.lineTo(200,sm?92:90);x.lineTo(200+s*(sm?30:34),sm?118:130);x.closePath();x.fill();x.stroke()}
+    const yEnd=sm?170:416;
+    x.strokeStyle='rgba(0,0,0,.35)';x.lineWidth=2;x.beginPath();x.moveTo(200,92);x.lineTo(200,yEnd);x.stroke();
+    x.fillStyle=g.btn||'#ddd';
+    for(let y=sm?112:130;y<yEnd-6;y+=sm?30:46){x.beginPath();x.arc(200,y,4.2,0,7);x.fill();x.strokeStyle='rgba(0,0,0,.35)';x.lineWidth=1;x.stroke()}
+  }
+  if(g.denim){
+    x.strokeStyle='#e8b26a';x.lineWidth=1.6;x.setLineDash([4,3]);
+    x.strokeRect(122,160,44,40);x.strokeRect(234,160,44,40);
+    x.beginPath();x.moveTo(100,134);x.lineTo(300,134);x.stroke();
+    x.beginPath();x.moveTo(100,400);x.lineTo(300,400);x.stroke();
+    x.setLineDash([]);
+  }
+  if(g.pocket==='kanga'){
+    x.fillStyle='rgba(0,0,0,.10)';x.strokeStyle='rgba(0,0,0,.35)';x.lineWidth=2;
+    x.beginPath();x.moveTo(128,300);x.lineTo(272,300);x.lineTo(284,392);x.lineTo(116,392);x.closePath();x.fill();x.stroke();
+  }
+  return c;
+}
+G.forEach(g=>{g.torso=buildTorso(g)});
+
+/* ============ chizish ============ */
+function limb(c,p,q,w0,w1,fill,edge=true){
+  const dx=q.x-p.x,dy=q.y-p.y,L=Math.hypot(dx,dy)||1,nx=-dy/L,ny=dx/L;
+  c.beginPath();
+  c.moveTo(p.x+nx*w0/2,p.y+ny*w0/2);c.lineTo(q.x+nx*w1/2,q.y+ny*w1/2);
+  c.lineTo(q.x-nx*w1/2,q.y-ny*w1/2);c.lineTo(p.x-nx*w0/2,p.y-ny*w0/2);c.closePath();
+  c.fillStyle=fill;c.fill();
+  if(edge){c.strokeStyle='rgba(0,0,0,.22)';c.lineWidth=Math.max(1,(w0+w1)*.04);c.stroke()}
+}
+function disc(c,p,r,fill){c.beginPath();c.arc(p.x,p.y,r,0,7);c.fillStyle=fill;c.fill()}
+function hilite(c,p,q,w){
+  const dx=q.x-p.x,dy=q.y-p.y,L=Math.hypot(dx,dy)||1,nx=-dy/L,ny=dx/L;
+  c.strokeStyle='rgba(255,255,255,.08)';c.lineWidth=w;c.lineCap='round';
+  c.beginPath();c.moveTo(p.x+nx*w*.4,p.y+ny*w*.4);c.lineTo(q.x+nx*w*.3,q.y+ny*w*.3);c.stroke();
+}
+
+function sleeveFor(c,g,S,E,Wr,sw,pat){
+  const L=g.loose;
+  if(g.sleeve==='short'){
+    const T=add(S,sub(E,S),.55),w0=.40*sw*L,w1=.36*sw*L;
+    limb(c,S,T,w0,w1,pat);disc(c,S,w0/2,pat);
+    hilite(c,S,T,w1*.3);
+    const d=norm(sub(T,S)),B=add(T,d,-.05*sw);
+    limb(c,B,T,w1*1.0,w1*1.0,g.rib,false);
+    return;
+  }
+  const T=add(E,sub(Wr,E),.95);
+  const w0=.38*sw*L,w1=.33*sw*L,w2=.26*sw*(L>1.1?1.05:1);
+  limb(c,S,E,w0,w1,pat);disc(c,S,w0/2,pat);
+  disc(c,E,w1/2,pat);
+  limb(c,E,T,w1,w2,pat);
+  hilite(c,S,E,w1*.3);hilite(c,E,T,w2*.3);
+  // manjet
+  const d=norm(sub(T,E)),B=add(T,d,-.11*sw);
+  if(g.hem||g.collar==='stand'){limb(c,B,T,w2*1.02,w2*1.02,g.rib,false);
+    c.strokeStyle='rgba(0,0,0,.15)';c.lineWidth=1.5;
+    const nx=-d.y,ny=d.x;for(let k=0;k<5;k++){const p=add(B,d,(.11*sw)*k/4);c.beginPath();c.moveTo(p.x-nx*w2/2,p.y-ny*w2/2);c.lineTo(p.x+nx*w2/2,p.y+ny*w2/2);c.stroke()}
+  } else {limb(c,B,T,w2*1.0,w2*1.0,'rgba(0,0,0,.12)',false)}
+}
+
+/* rig: {a,b,ea,eb,wa,wb,ha,hb,fa,fb}; a — ekranda chapdagi yelka */
+function drawGarment(c,g,rig,o={}){
+  const M=mul(add(rig.a,rig.b),.5),H=mul(add(rig.ha,rig.hb),.5);
+  const sw=dist(rig.a,rig.b),hw=dist(rig.ha,rig.hb);
+  const u=norm(sub(rig.b,rig.a));
+  const v=mul(sub(H,M),1.12); // yelkadan etakgacha
+  const bright=o.bright??1;
+  c.save();
+  if('filter' in c) c.filter=`brightness(${bright.toFixed(2)})`;
+  c.imageSmoothingQuality='high';
+  if(g.flat){ // yuklangan rasm: bitta bo'lak
+    const ang=Math.atan2(u.y,u.x);
+    c.translate(M.x,M.y);c.rotate(ang);
+    const wd=sw*2.05,ht=Math.hypot(v.x,v.y)*1.18;
+    c.drawImage(g.flat,-wd/2,-ht*.12,wd,ht);
+    c.restore();return;
+  }
+  // 1) tana: gorizontal tasmalar
+  const wTop=sw*1.14*g.loose, wBot=clamp(hw*1.5,sw*.95,sw*1.3)*g.loose;
+  const N=30,y0=34,y1=420,step=(y1-y0)/N;
+  for(let i=0;i<N;i++){
+    const sy=y0+i*step,tc=(sy+step/2-90)/330,t=clamp(tc,0,1);
+    const Wd=lerp(wTop,wBot,t);
+    const X=mul(u,Wd/200),Y=mul(v,1/330);
+    c.setTransform(1,0,0,1,0,0);
+    if(o.base)c.setTransform(...o.base);
+    c.transform(X.x,X.y,Y.x,Y.y,M.x-X.x*200-Y.x*90,M.y-X.y*200-Y.y*90);
+    c.drawImage(g.torso,0,sy,400,step+1.2,0,sy,400,step+1.2);
+  }
+  c.setTransform(1,0,0,1,0,0);if(o.base)c.setTransform(...o.base);
+  // 2) yenglar
+  const pat=c.createPattern(g.fab,'repeat');
+  const ang=Math.atan2(u.y,u.x),sc=1.14*sw/200;
+  try{pat.setTransform(new DOMMatrix().translate(M.x,M.y).rotateSelf(ang*180/Math.PI).scaleSelf(sc))}catch(e){}
+  sleeveFor(c,g,rig.a,rig.ea,rig.wa,sw,pat);
+  sleeveFor(c,g,rig.b,rig.eb,rig.wb,sw,pat);
+  c.restore();
+}
+
+/* ============ kiyim kartochkalari ============ */
+function thumbRig(){
+  return{a:{x:68,y:66},b:{x:152,y:66},ha:{x:80,y:172},hb:{x:140,y:172},
+    ea:{x:50,y:118},eb:{x:170,y:118},wa:{x:44,y:170},wb:{x:176,y:170}};
+}
+function thumbOf(g){
+  const c=mk(220,250),x=c.getContext('2d');
+  x.fillStyle='#e9ebee';x.fillRect(0,0,220,250);
+  // manekenning bo'yni va qo'llari uchun oddiy soya
+  x.fillStyle='#d3d6db';x.beginPath();x.ellipse(110,42,22,26,0,0,7);x.fill();
+  drawGarment(x,g,thumbRig(),{bright:1});
+  return c.toDataURL();
+}
+
+let current=0,custom=null;
+const grid=document.getElementById('grid');
+function renderGrid(){
+  grid.innerHTML='';
+  G.forEach((g,i)=>{
+    const b=document.createElement('button');b.type='button';b.className='item'+(current===i?' on':'');
+    if(!g.thumb)g.thumb=thumbOf(g);
+    b.innerHTML=`<img alt="" src="${g.thumb}"><span>${g.name}</span>`;
+    b.onclick=()=>{current=i;renderGrid()};grid.appendChild(b);
+  });
+  if(custom){
+    const b=document.createElement('button');b.type='button';b.className='item'+(current==='c'?' on':'');
+    b.innerHTML=`<img alt="" src="${custom.thumb}"><span>Sizning kiyim</span>`;b.onclick=()=>{current='c';renderGrid()};grid.appendChild(b);
+  }
+  const up=document.createElement('button');up.type='button';up.className='item act';up.textContent='+ O‘z kiyimingizni yuklang';
+  up.onclick=()=>document.getElementById('file').click();grid.appendChild(up);
+  const off=document.createElement('button');off.type='button';off.className='item act'+(current===-1?' on':'');off.textContent='Kiyimsiz';
+  off.onclick=()=>{current=-1;renderGrid()};grid.appendChild(off);
+}
+renderGrid();
+
+// o'z kiyimini yuklash: fon rangini olib tashlaydi
+document.getElementById('file').onchange=e=>{
+  const f=e.target.files[0];if(!f)return;
+  const img=new Image();img.onload=()=>{
+    const s=Math.min(1,700/Math.max(img.width,img.height));
+    const c=mk(Math.round(img.width*s),Math.round(img.height*s)),x=c.getContext('2d');x.drawImage(img,0,0,c.width,c.height);
+    const d=x.getImageData(0,0,c.width,c.height),p=d.data;
+    if(p[3]===255){const r=p[0],g=p[1],b=p[2];
+      for(let i=0;i<p.length;i+=4){const dd=Math.abs(p[i]-r)+Math.abs(p[i+1]-g)+Math.abs(p[i+2]-b);if(dd<60)p[i+3]=0;else if(dd<110)p[i+3]=(dd-60)*5}}
+    x.putImageData(d,0,0);
+    // bo'sh joyni kesish
+    let mnx=c.width,mny=c.height,mxx=0,mxy=0;
+    for(let y=0;y<c.height;y++)for(let xx=0;xx<c.width;xx++){if(p[(y*c.width+xx)*4+3]>40){mnx=Math.min(mnx,xx);mxx=Math.max(mxx,xx);mny=Math.min(mny,y);mxy=Math.max(mxy,y)}}
+    const w=Math.max(1,mxx-mnx),h=Math.max(1,mxy-mny),o=mk(w,h);o.getContext('2d').drawImage(c,mnx,mny,w,h,0,0,w,h);
+    const g={flat:o,loose:1,name:'Sizning kiyim'};
+    const t=mk(220,250),tx=t.getContext('2d');tx.fillStyle='#e9ebee';tx.fillRect(0,0,220,250);
+    const k=Math.min(200/w,230/h);tx.drawImage(o,110-w*k/2,125-h*k/2,w*k,h*k);g.thumb=t.toDataURL();
+    custom=g;G.custom=g;current='c';renderGrid();
+  };img.src=URL.createObjectURL(f);e.target.value='';
+};
+
+/* ============ kamera va poza ============ */
+const vid=document.getElementById('vid'),cv=document.getElementById('cv'),ctx=cv.getContext('2d',{willReadFrequently:true});
+const hint=document.getElementById('hint'),intro=document.getElementById('intro'),err=document.getElementById('err'),snap=document.getElementById('snap');
+let pose,running=false,lastOk=0,sm={},bright=1,frameNo=0;
+const SM=.5;
+const sp=(k,p)=>{const o=sm[k];return sm[k]=o?{x:lerp(o.x,p.x,SM),y:lerp(o.y,p.y,SM)}:p};
+
+function onResults(r){
+  const w=cv.width,h=cv.height;
+  ctx.save();ctx.translate(w,0);ctx.scale(-1,1);ctx.drawImage(vid,0,0,w,h);ctx.restore();
+  const L=r.poseLandmarks;
+  const vis=i=>L[i].visibility??1;
+  const ok=L&&[11,12,23,24].every(i=>vis(i)>.5);
+  if(!ok){if(performance.now()-lastOk>800)hint.hidden=false;return}
+  hint.hidden=true;lastOk=performance.now();
+  const g=current===-1?null:(current==='c'?G.custom:G[current]);
+  if(!g)return;
+  const P=i=>({x:(1-L[i].x)*w,y:L[i].y*h});
+  const left=P(11).x<P(12).x;
+  const ia=left?{s:11,e:13,w:15,h:23,p:17,i:19}:{s:12,e:14,w:16,h:24,p:18,i:20};
+  const ib=left?{s:12,e:14,w:16,h:24,p:18,i:20}:{s:11,e:13,w:15,h:23,p:17,i:19};
+  const rig={};
+  rig.a=sp('a',P(ia.s));rig.b=sp('b',P(ib.s));rig.ha=sp('ha',P(ia.h));rig.hb=sp('hb',P(ib.h));
+  const M=mul(add(rig.a,rig.b),.5),H=mul(add(rig.ha,rig.hb),.5),vh=norm(sub(H,M)),TL=dist(M,H);
+  const arm=(s,k,I)=>{
+    const S=rig[s];
+    const E=vis(I.e)>.35?sp('e'+k,P(I.e)):sp('e'+k,add(S,vh,.5*TL));
+    const Wr=vis(I.w)>.35?sp('w'+k,P(I.w)):sp('w'+k,add(E,vh,.5*TL));
+    rig['e'+k]=E;rig['w'+k]=Wr;
+    rig['f'+k]=vis(I.i)>.35?mul(add(P(I.i),P(I.p)),.5):null;
+  };
+  arm('a','a',ia);arm('b','b',ib);
+  // yorug'likka moslash
+  if(frameNo++%8===0){
+    try{const cx=clamp(M.x*.5+H.x*.5,12,w-12),cy=clamp(M.y*.5+H.y*.5,12,h-12);
+      const d=ctx.getImageData(cx-8,cy-8,16,16).data;let s=0;for(let i=0;i<d.length;i+=4)s+=.3*d[i]+.59*d[i+1]+.11*d[i+2];
+      const lum=s/(d.length/4);bright=lerp(bright,clamp(.55+lum/255*.75,.7,1.15),.4)}catch(e){}
+  }
+  drawGarment(ctx,g,rig,{bright});
+  // qo'llar va bosh kiyim ustida qolishi uchun videoni qayta chizamiz
+  const back=(draw)=>{ctx.save();draw();ctx.translate(w,0);ctx.scale(-1,1);ctx.drawImage(vid,0,0,w,h);ctx.restore()};
+  if(g.sleeve==='long'&&!g.flat){
+    for(const k of['a','b']){
+      const Wr=rig['w'+k],F=rig['f'+k];if(!F)continue;
+      const Cc=add(Wr,sub(F,Wr),.8),R=Math.max(dist(Wr,F)*1.0,.07*dist(rig.a,rig.b));
+      back(()=>{ctx.beginPath();ctx.arc(Cc.x,Cc.y,R,0,7);ctx.clip()});
+    }
+  }
+  const mouthVis=vis(9)>.4&&vis(10)>.4;
+  const Mo=mouthVis?mul(add(P(9),P(10)),.5):add(M,vh,-.34*dist(rig.a,rig.b));
+  const B=add(Mo,sub(M,Mo),.52),u=norm(sub(rig.b,rig.a)),big=1500;
+  back(()=>{ctx.beginPath();ctx.moveTo(B.x-u.x*big,B.y-u.y*big);ctx.lineTo(B.x+u.x*big,B.y+u.y*big);
+    ctx.lineTo(B.x+u.x*big-vh.x*big,B.y+u.y*big-vh.y*big);ctx.lineTo(B.x-u.x*big-vh.x*big,B.y-u.y*big-vh.y*big);ctx.closePath();ctx.clip()});
+}
+
+async function start(){
+  err.textContent='';
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{width:1280,height:960,facingMode:'user'},audio:false});
+    vid.srcObject=stream;await vid.play();
+  }catch(e){err.textContent='Kameraga ruxsat berilmadi. Brauzer sozlamasidan ruxsat bering va qayta urinib ko‘ring.';return}
+  if(typeof Pose==='undefined'){err.textContent='Poza modeli yuklanmadi. Internetni tekshiring.';return}
+  intro.hidden=true;snap.hidden=false;
+  cv.width=vid.videoWidth||960;cv.height=vid.videoHeight||720;
+  document.getElementById('stage').style.aspectRatio=cv.width+'/'+cv.height;
+  pose=new Pose({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`});
+  pose.setOptions({modelComplexity:1,smoothLandmarks:true,minDetectionConfidence:.5,minTrackingConfidence:.5});
+  pose.onResults(onResults);
+  running=true;
+  (async function loop(){if(!running)return;try{await pose.send({image:vid})}catch(e){}requestAnimationFrame(loop)})();
+}
+document.getElementById('start').onclick=start;
+snap.onclick=()=>{const a=document.createElement('a');a.href=cv.toDataURL('image/png');a.download='anywear.png';a.click()};
+</script>
+</body>
+</html>
